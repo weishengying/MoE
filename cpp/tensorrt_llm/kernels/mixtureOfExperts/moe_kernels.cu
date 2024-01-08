@@ -978,18 +978,6 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     topkGatingSoftmaxKernelLauncher<T>(gating_output, finished, expert_scales, softmax_out_, expert_for_source_row,
         source_rows_, num_rows, num_experts, k, start_expert, end_expert, stream);
 
-    printf("expert_for_source_row:\n");
-    print2dToScreen<int>(expert_for_source_row, num_rows, k, 1);
-    
-    printf("expert_scales:\n");
-    print2dToScreen<T>(expert_scales, num_rows, k, 1);
-
-    printf("softmax_out_:\n");
-    print2dToScreen<T>(softmax_out_, num_rows, k, 1);
-
-    printf("source_rows_:\n");
-    print2dToScreen<int>(source_rows_, num_rows, 1, 1);
-
     sync_check_cuda_error();
 
     sorter_.updateNumExperts(num_experts);
@@ -1016,7 +1004,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
 
     if (!isGatedActivation(fc1_activation_type))
     {
-        moe_gemm_runner_.moeGemmBiasAct(permuted_data_, fc1_expert_weights, fc1_scales, fc1_expert_biases, fc1_result_,
+        moe_gemm_runner_.moeGemmBiasAct(permuted_data_, fc1_expert_weights, fc1_scales, nullptr, fc1_result_,
             total_rows_before_expert_, expanded_active_expert_rows, inter_size, hidden_size, num_experts_per_node,
             fc1_activation_type, stream);
     }

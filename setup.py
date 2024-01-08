@@ -22,6 +22,9 @@ NVCC_FLAGS = ["-O2", "-std=c++17"]
 
 ABI = 1 if torch._C._GLIBCXX_USE_CXX11_ABI else 0
 
+CXX_FLAGS += ["-DENABLE_BF16"]
+
+NVCC_FLAGS += ["-DENABLE_BF16"]
 
 NVCC_FLAGS += [f"-D_GLIBCXX_USE_CXX11_ABI={ABI}", "-U__CUDA_NO_HALF_OPERATORS__", "-U__CUDA_NO_HALF_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_HALF2_OPERATORS__"]
 
@@ -167,7 +170,7 @@ include_path.append("/usr/local/tensorrt/include/")
 th_moe_extension = CUDAExtension(
     name="moe_ops",
     sources=sources,
-    extra_compile_args={"nvcc": NVCC_FLAGS},
+    extra_compile_args={"nvcc": NVCC_FLAGS, "cxx": CXX_FLAGS},
     include_dirs=include_path
 )
 ext_modules.append(th_moe_extension)
