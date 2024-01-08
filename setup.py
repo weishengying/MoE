@@ -154,7 +154,7 @@ sources=["cpp/tensorrt_llm/kernels/cutlass_kernels/cutlass_heuristic.cpp",
         "cpp/tensorrt_llm/common/stringUtils.cpp",
         "cpp/tensorrt_llm/common/logger.cpp",
         "cpp/tensorrt_llm/common/tllmException.cpp",
-        "tests/moe/moe.cpp"
+        "moe/moe.cpp"
         ]
 
 base_dir = os.path.abspath(os.path.dirname(__file__))
