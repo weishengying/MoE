@@ -1012,26 +1012,35 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     {
         const size_t fc1_out_size = inter_size * 2;
         // Run the GEMM with activation function overridden with `Identity`, we do the activation separately
-        moe_gemm_runner_.moeGemmBiasAct(permuted_data_, fc1_expert_weights, fc1_scales, fc1_expert_biases,
+        moe_gemm_runner_.moeGemmBiasAct(permuted_data_, fc1_expert_weights, fc1_scales, nullptr,
             glu_inter_result_, total_rows_before_expert_, expanded_active_expert_rows, fc1_out_size, hidden_size,
             num_experts_per_node, ActivationType::Identity, stream);
 
         sync_check_cuda_error();
 
-        doGatedActivation<T>(
-            fc1_result_, glu_inter_result_, num_valid_tokens_ptr, inter_size, num_rows, fc1_activation_type, stream);
-    }
+        // printf("glu_inter_result_:\n");
+        // printToScreen<T>(glu_inter_result_, k*num_rows*fc1_out_size);
 
+        doGatedActivation<T>(
+            fc1_result_, glu_inter_result_, num_valid_tokens_ptr, inter_size, num_rows*k, fc1_activation_type, stream);
+        
+        // printf("fc1_result_:\n");
+        // printToScreen<T>(fc1_result_, k*num_rows*inter_size);
+    }
     sync_check_cuda_error();
+
 
     moe_gemm_runner_.moeGemm(fc1_result_, fc2_expert_weights, fc2_scales, fc2_result, total_rows_before_expert_,
         expanded_active_expert_rows, hidden_size, inter_size, num_experts_per_node, stream);
 
     sync_check_cuda_error();
 
+    // printf("fc2_result:\n");
+    //     printToScreen<T>(fc2_result, k*num_rows*hidden_size);
+
     finalizeMoeRoutingKernelLauncher<T>(fc2_result, final_output,
         // TODO pass 'skip' connections (residuals)
-        nullptr, nullptr, fc2_expert_biases, expert_scales, expanded_source_row_to_expanded_dest_row,
+        nullptr, nullptr, nullptr, expert_scales, expanded_source_row_to_expanded_dest_row,
         expert_for_source_row, num_rows, hidden_size, k, num_valid_tokens_ptr, parallelism_config, normalization_mode,
         stream);
 

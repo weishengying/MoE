@@ -32,6 +32,9 @@ tensorrt_llm::ActivationType getActivationType(std::string activation_type_str)
     else if (activation_type_str == "GeGLU" || activation_type_str == "geglu" || activation_type_str == "gated-gelu") {
         return tensorrt_llm::ActivationType::Geglu;
     }
+    else if (activation_type_str == "Swiglu") {
+        return tensorrt_llm::ActivationType::Swiglu;
+    }
     else {
         std::cout << "Activation Type: " <<  activation_type_str << " not supported !";
     }
@@ -205,7 +208,7 @@ Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
     TORCH_CHECK(fc2_expert_weights.dim() == 3, "Invalid rank for fc2 weights");
     TORCH_CHECK(fc2_expert_weights.size(0) == gating_output.size(-1),
                 "Experts mismatch between gate outputs and fc2 weights");
-    TORCH_CHECK(fc2_expert_weights.size(1) == fc1_num_cols, "fc1 weight last dim must equal dim 1 of fc2 weights");
+    // TORCH_CHECK(fc2_expert_weights.size(1) == fc1_num_cols, "fc1 weight last dim must equal dim 1 of fc2 weights"); 如果是 glu 类，该条件无法满足
 
     if (_st != torch::kFloat32 && _st != torch::kFloat16) {
         CHECK_INPUT(fc2_scales, _st);

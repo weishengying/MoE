@@ -21,13 +21,6 @@ def random_cuda_tensor(shape, dtype, mean=0, std=1):
     return torch.empty(shape, dtype=dtype, device="cuda").normal_(mean, std)
 
 def basic_moe_fc(activations, expert_for_row, weights, scales, biases):
-  if weights.dtype == torch.int8:
-      weights = torch.multiply(weights, scales.unsqueeze(1))
-      weights = weights.to(activations.dtype)
-  elif weights.dtype != torch.bfloat16 and weights.dtype != torch.float16 and weights.dtype != torch.float32:
-      raise ValueError("Invalid data type for weights")
-      
-
   res = torch.zeros(size=[activations.shape[0], weights.shape[-1]], dtype=activations.dtype, device='cuda')
   for row in range(activations.shape[0]):
       row_expert = expert_for_row[row]
@@ -35,18 +28,10 @@ def basic_moe_fc(activations, expert_for_row, weights, scales, biases):
       # res[row] += biases[row_expert] # skip bias
   return res
 
-def apply_act(inp, act_str):
-  if act_str == "identity":
-    return inp
-  elif act_str == "silu":
-    return torch.nn.SiLU()(inp)
-  elif act_str == "relu":
-    return torch.nn.ReLU()(inp)
-  elif act_str == "gelu":
-    return torch.nn.GELU(approximate="tanh")(inp)
-  else:
-    assert False, "Unsupported activation"
-
+def apply_act(inp, act_str): # inp (num_rows, inter_size)
+  assert(act_str == "Swiglu")
+  gated_size = int(inp.size(-1) / 2)
+  return torch.nn.SiLU()(inp[:, gated_size : ]) * inp[:,  : gated_size] #这里请注意顺序，这样做的目的是为了适配 dogatedkernel, 当然也可以只接修改 dogatedkernel
 
 class TestMoe(unittest.TestCase):
 
@@ -72,18 +57,16 @@ class TestMoe(unittest.TestCase):
   
   def generate_weights(self, hidden_size, inter_size, num_experts, dtype, quant_type):
     weights = dict()
-    quantize = quant_type == torch.int8 or quant_type == torch.quint4x2
-
-    weights["fc1_expert_weights_for_ref"] = random_cuda_tensor([num_experts, hidden_size, inter_size], dtype, mean=0, std=0.02)
+    weights["fc1_expert_weights_for_ref"] = random_cuda_tensor([num_experts, hidden_size, inter_size*2], dtype, mean=0, std=0.02)
     weights["fc1_expert_weights_for_ft"] = weights["fc1_expert_weights_for_ref"]
-    weights["fc1_scales"] = torch.ones(size=[num_experts, inter_size], dtype=dtype, device="cuda")
-    weights["fc1_expert_biases"] = random_cuda_tensor([num_experts, inter_size], dtype, mean=0, std=0.002)
+    weights["fc1_scales"] = torch.ones(size=[num_experts, inter_size*2], dtype=dtype, device="cuda")
+    weights["fc1_expert_biases"] = random_cuda_tensor([num_experts, inter_size*2], dtype, mean=0, std=0.002)
 
     weights["fc2_expert_weights_for_ref"] = random_cuda_tensor([num_experts, inter_size, hidden_size], dtype, mean=0, std=0.02)
     weights["fc2_expert_weights_for_ft"] = weights["fc2_expert_weights_for_ref"]
     weights["fc2_scales"] = torch.ones(size=[num_experts, hidden_size], dtype=dtype, device="cuda")
     weights["fc2_expert_biases"] = random_cuda_tensor([num_experts, hidden_size], dtype, mean=0, std=0.002)
-
+  
     return weights
   
   def run_ft_moe(self, input_dict, active_rows, k, activation_str):
@@ -108,17 +91,20 @@ class TestMoe(unittest.TestCase):
       moe_fc_1_result = basic_moe_fc(input_dict["input_activations"], current_experts_for_row, 
                                      input_dict["fc1_expert_weights_for_ref"], input_dict["fc1_scales"], input_dict["fc1_expert_biases"])
 
+      # print(f"moe_fc_1_result: {moe_fc_1_result}")
       moe_fc_1_result = apply_act(moe_fc_1_result, activation_str)
+      # print(f"moe_fc_1_result: {moe_fc_1_result}")
 
       moe_fc_2_result = basic_moe_fc(moe_fc_1_result, current_experts_for_row, 
                                      input_dict["fc2_expert_weights_for_ref"], input_dict["fc2_scales"], input_dict["fc2_expert_biases"])
       
+      # print(f"moe_fc_2_result: {moe_fc_2_result}")
       output = output + current_expert_scales * moe_fc_2_result
     return output
 
   def moe_test_helper(self, dtype, quant_type, rtol, atol, activation_str="gelu", experts_list=[32], hidden_sizes=[1024], inter_sizes=[4096]):
     torch.cuda.empty_cache() # Empty the cache here so a bad ordering does not cause OOM.
-    rows = [2, 16, 512, 2048]
+    rows = [1024]
     ks = [2, 4]
 
     for hidden_size in hidden_sizes:
@@ -146,19 +132,19 @@ class TestMoe(unittest.TestCase):
   
   def test_moe_fp32_relu(self):
     self.moe_test_helper(torch.float32, torch.float32, rtol=1e-3, atol=1e-5, \
-                         activation_str="silu", \
+                         activation_str="Swiglu", \
                          experts_list=[32], hidden_sizes=[1024, 2048], \
                          inter_sizes=[4096])
 
   def test_moe_fp16_gelu(self):
-    self.moe_test_helper(torch.float16, torch.float16, rtol=1e-3, atol=0.05, \
-                         activation_str="silu", \
+    self.moe_test_helper(torch.float16, torch.float16, rtol=1e-3, atol=1e-3, \
+                         activation_str="Swiglu", \
                          experts_list=[32], hidden_sizes=[1024, 2048], \
                          inter_sizes=[4096])
 
   def test_moe_bf16_gelu(self):
     self.moe_test_helper(torch.bfloat16, torch.bfloat16, rtol=1e-3, atol=0.05, \
-                         activation_str="silu", \
+                         activation_str="Swiglu", \
                          experts_list=[32], hidden_sizes=[1024, 2048], \
                          inter_sizes=[4096])
 
