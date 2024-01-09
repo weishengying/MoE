@@ -5,6 +5,8 @@
 #include <cublas_v2.h>
 #include <cuda_fp16.h>
 
+#include <optional>
+
 #include "tensorrt_llm/kernels/mixtureOfExperts/moe_kernels.h"
 #include "tensorrt_llm/kernels/cutlass_kernels/moe_gemm/moe_gemm_kernels.h"
 
@@ -45,14 +47,8 @@ template<typename T, typename WeightType>
 Tensor run_moe_fc_helper(Tensor                            input_activations, //(num_tokens, hidden_size)
                          Tensor                            gating_output, //(num_tokens, num_experts)
                          Tensor                            fc1_expert_weights, //(num_experts, hidden_size, inter_size)
-                         Tensor                            fc1_scales, //(num_experts, inter_size) 量化scale
-                         Tensor                            fc1_expert_biases, //(num_experts, inter_size)
                          tensorrt_llm::ActivationType fc1_activation_type,
                          Tensor                            fc2_expert_weights, //(num_experts, inter_size, hidden_size)
-                         Tensor                            fc2_scales, //(num_experts, hidden_size) 量化scale
-                         Tensor                            fc2_expert_biases, //(num_experts, hidden_size)
-                         Tensor                            skip_layer, //(num_rows, hidden_size)
-                         Tensor                            finished, //(num_rows)
                          const int                         active_rows,
                          const int                         k)
 {
@@ -75,15 +71,15 @@ Tensor run_moe_fc_helper(Tensor                            input_activations, //
     static constexpr bool ignore_scales = is_fp16_or_fp32;
 #endif
 
-    T* fc1_scales_ptr        = ignore_scales ? nullptr : get_ptr<T>(fc1_scales);
-    T* fc1_expert_biases_ptr = get_ptr<T>(fc1_expert_biases);
+    T* fc1_scales_ptr        = ignore_scales ? nullptr : nullptr;
+    T* fc1_expert_biases_ptr = nullptr;
 
     WeightType* fc2_expert_weights_ptr = get_ptr<WeightType>(fc2_expert_weights);
-    T*          fc2_scales_ptr         = ignore_scales ? nullptr : get_ptr<T>(fc2_scales);
-    T*          fc2_expert_biases_ptr  = get_ptr<T>(fc2_expert_biases);
+    T*          fc2_scales_ptr         = ignore_scales ? nullptr : nullptr;
+    T*          fc2_expert_biases_ptr  = nullptr;
 
-    T*    skip_layer_ptr = get_ptr<T>(skip_layer);
-    bool* finished_ptr   = get_ptr<bool>(finished);
+    // bool* finished_ptr   = get_ptr<bool>(finished);
+    bool* finished_ptr = nullptr;
 
     tensorrt_llm::kernels::MOEParallelismConfig moe_parallel_config = tensorrt_llm::kernels::MOEParallelismConfig::TensorParallelism(1, 0);
     tensorrt_llm::kernels::CutlassMoeFCRunner<T, WeightType> moe_runner;
@@ -115,12 +111,12 @@ Tensor run_moe_fc_helper(Tensor                            input_activations, //
     moe_runner.runMoe(input_act_ptr,
                         gating_output_ptr,
                         fc1_expert_weights_ptr,
-                        fc1_scales_ptr,
-                        fc1_expert_biases_ptr,
+                        fc1_scales_ptr, // nullptr
+                        fc1_expert_biases_ptr, // nullptr
                         fc1_activation_type,
                         fc2_expert_weights_ptr,
-                        fc2_scales_ptr,
-                        fc2_expert_biases_ptr,
+                        fc2_scales_ptr, // nullptr
+                        fc2_expert_biases_ptr, // nullptr
                         num_rows,
                         hidden_size,
                         inter_size,
@@ -129,8 +125,8 @@ Tensor run_moe_fc_helper(Tensor                            input_activations, //
                         workspace_ptr,
                         output_tensor_ptr,
                         fc2_output_ptr,
-                        finished_ptr,
-                        active_rows,
+                        finished_ptr, // nullptr
+                        active_rows, // original num_rows
                         expert_scales_ptr,
                         expanded_source_row_to_expanded_dest_row_ptr,
                         expert_for_source_row_ptr,
@@ -145,14 +141,8 @@ Tensor run_moe_fc_helper(Tensor                            input_activations, //
 Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
                   Tensor      gating_output, //(num_tokens, num_experts)
                   Tensor      fc1_expert_weights, //(num_experts, hidden_size, inter_size)
-                  Tensor      fc1_scales, //(num_experts, inter_size) 量化scale
-                  Tensor      fc1_expert_biases, //(num_experts, inter_size)
                   std::string fc1_activation_type_str,
                   Tensor      fc2_expert_weights, //(num_experts, inter_size, hidden_size)
-                  Tensor      fc2_scales, //(num_experts, hidden_size) 量化scale
-                  Tensor      fc2_expert_biases, //(num_experts, hidden_size)
-                  Tensor      skip_layer, //(num_rows, hidden_size)
-                  Tensor      finished, //(num_rows)
                   int64_t     active_rows,
                   int64_t     k)
 {
@@ -164,15 +154,7 @@ Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
     const int inter_size  = fc2_expert_weights.size(1);
     const int num_experts = gating_output.size(-1);
 
-    // We signal int4 by having the last weight dim be half the size of the scales. This is because int4 elements are
-    // packed into a single byte.
     torch::ScalarType quant_type = fc2_expert_weights.scalar_type();
-    TORCH_CHECK(fc2_expert_weights.scalar_type() == fc1_expert_weights.scalar_type(),
-                "FC1 and FC2 must be quantized to the same type");
-    if (fc1_scales.dim() > 0 && fc1_expert_weights.size(-1) == fc1_scales.size(-1) / 2) {
-        TORCH_CHECK(fc2_expert_weights.size(-1) == fc2_scales.size(-1) / 2, "FC1 and FC2 must be both be int4.");
-        quant_type = at::ScalarType::QUInt4x2;
-    }
 
     CHECK_INPUT(input_activations, _st);
     TORCH_CHECK(input_activations.dim() == 2, "Invalid rank for activations");
@@ -188,50 +170,15 @@ Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
     TORCH_CHECK(fc1_expert_weights.size(1) == hidden_size,
                 "Activation last dim must equal size of dim 1 for fc1 weight");
 
-    const int fc1_num_cols =
-        quant_type == at::ScalarType::QUInt4x2 ? 2 * fc1_expert_weights.size(-1) : fc1_expert_weights.size(-1);
-    if (_st != torch::kFloat32 && _st != torch::kFloat16) {
-        CHECK_INPUT(fc1_scales, _st);
-        TORCH_CHECK(fc1_scales.dim() == 2, "Invalid rank for fc1 scales");
-        TORCH_CHECK(fc1_scales.size(0) == num_experts, "Experts mismatch between gate outputs and fc1 scales");
-        TORCH_CHECK(fc1_scales.size(-1) == fc1_num_cols, "Mismatch between fc1 weights and scale shapes");
-        TORCH_CHECK(fc1_scales.size(-1) == fc1_expert_biases.size(-1), "Mismatch between fc1 scale and bias shapes");
-    }
+    const int fc1_num_cols = fc1_expert_weights.size(-1);
 
-    CHECK_INPUT(fc1_expert_biases, _st);
-    TORCH_CHECK(fc1_expert_biases.dim() == 2, "Invalid rank for fc1 biases");
-    TORCH_CHECK(fc1_expert_biases.size(0) == gating_output.size(-1),
-                "Experts mismatch between gate outputs and fc1 biases");
-
+    
     CHECK_TH_CUDA(fc2_expert_weights);
     CHECK_CONTIGUOUS(fc2_expert_weights);
     TORCH_CHECK(fc2_expert_weights.dim() == 3, "Invalid rank for fc2 weights");
     TORCH_CHECK(fc2_expert_weights.size(0) == gating_output.size(-1),
                 "Experts mismatch between gate outputs and fc2 weights");
     // TORCH_CHECK(fc2_expert_weights.size(1) == fc1_num_cols, "fc1 weight last dim must equal dim 1 of fc2 weights"); 如果是 glu 类，该条件无法满足
-
-    if (_st != torch::kFloat32 && _st != torch::kFloat16) {
-        CHECK_INPUT(fc2_scales, _st);
-        TORCH_CHECK(fc2_scales.dim() == 2, "Invalid rank for fc2 scales");
-        TORCH_CHECK(fc2_scales.size(0) == gating_output.size(-1),
-                    "Experts mismatch between gate outputs and fc2 scales");
-        const int fc2_num_cols =
-            quant_type == at::ScalarType::QUInt4x2 ? 2 * fc2_expert_weights.size(-1) : fc2_expert_weights.size(-1);
-        TORCH_CHECK(fc2_scales.size(-1) == fc2_num_cols, "Mismatch between fc2 weights and scale shapes");
-        TORCH_CHECK(fc2_scales.size(-1) == fc2_expert_biases.size(-1), "Mismatch between fc2 scale and bias shapes");
-    }
-
-    CHECK_INPUT(fc2_expert_biases, _st);
-    TORCH_CHECK(fc2_expert_biases.dim() == 2, "Invalid rank for fc2 biases");
-    TORCH_CHECK(fc2_expert_biases.size(0) == num_experts, "Experts mismatch between gate outputs and fc2 biases");
-
-    CHECK_INPUT(skip_layer, _st);
-    TORCH_CHECK(skip_layer.sizes() == input_activations.sizes(), "Invalid rank for skip connection");
-
-    CHECK_INPUT(finished, torch::kBool);
-    TORCH_CHECK(finished.dim() == 1, "Invalid rank for finished tensor");
-    TORCH_CHECK(finished.size(0) == input_activations.size(0),
-                "Finished and activations must have same number of rows");
 
     Tensor output_tensor;
 
@@ -250,14 +197,8 @@ Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
                 output_tensor = run_moe_fc_helper<float, float>(input_activations,
                                                                 gating_output,
                                                                 fc1_expert_weights,
-                                                                fc1_scales,
-                                                                fc1_expert_biases,
                                                                 fc1_activation_type,
                                                                 fc2_expert_weights,
-                                                                fc2_scales,
-                                                                fc2_expert_biases,
-                                                                skip_layer,
-                                                                finished,
                                                                 active_rows,
                                                                 k);
             }
@@ -273,46 +214,10 @@ Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
                 output_tensor = run_moe_fc_helper<half, half>(input_activations,
                                                               gating_output,
                                                               fc1_expert_weights,
-                                                              fc1_scales,
-                                                              fc1_expert_biases,
                                                               fc1_activation_type,
                                                               fc2_expert_weights,
-                                                              fc2_scales,
-                                                              fc2_expert_biases,
-                                                              skip_layer,
-                                                              finished,
                                                               active_rows,
                                                               k);
-            }
-            else if (quant_type == torch::kInt8) {
-                output_tensor = run_moe_fc_helper<half, uint8_t>(input_activations,
-                                                                 gating_output,
-                                                                 fc1_expert_weights,
-                                                                 fc1_scales,
-                                                                 fc1_expert_biases,
-                                                                 fc1_activation_type,
-                                                                 fc2_expert_weights,
-                                                                 fc2_scales,
-                                                                 fc2_expert_biases,
-                                                                 skip_layer,
-                                                                 finished,
-                                                                 active_rows,
-                                                                 k);
-            }
-            else if (quant_type == at::ScalarType::QUInt4x2) {
-                output_tensor = run_moe_fc_helper<half, cutlass::uint4b_t>(input_activations,
-                                                                           gating_output,
-                                                                           fc1_expert_weights,
-                                                                           fc1_scales,
-                                                                           fc1_expert_biases,
-                                                                           fc1_activation_type,
-                                                                           fc2_expert_weights,
-                                                                           fc2_scales,
-                                                                           fc2_expert_biases,
-                                                                           skip_layer,
-                                                                           finished,
-                                                                           active_rows,
-                                                                           k);
             }
             else {
                 std::string err_msg = "Unsupported weight type " + std::string(at::toString(quant_type));
@@ -326,46 +231,10 @@ Tensor run_moe_fc(Tensor      input_activations, //(num_tokens, hidden_size)
                 output_tensor = run_moe_fc_helper<__nv_bfloat16, __nv_bfloat16>(input_activations,
                                                                                 gating_output,
                                                                                 fc1_expert_weights,
-                                                                                fc1_scales,
-                                                                                fc1_expert_biases,
                                                                                 fc1_activation_type,
                                                                                 fc2_expert_weights,
-                                                                                fc2_scales,
-                                                                                fc2_expert_biases,
-                                                                                skip_layer,
-                                                                                finished,
                                                                                 active_rows,
                                                                                 k);
-            }
-            else if (quant_type == torch::kInt8) {
-                output_tensor = run_moe_fc_helper<__nv_bfloat16, uint8_t>(input_activations,
-                                                                          gating_output,
-                                                                          fc1_expert_weights,
-                                                                          fc1_scales,
-                                                                          fc1_expert_biases,
-                                                                          fc1_activation_type,
-                                                                          fc2_expert_weights,
-                                                                          fc2_scales,
-                                                                          fc2_expert_biases,
-                                                                          skip_layer,
-                                                                          finished,
-                                                                          active_rows,
-                                                                          k);
-            }
-            else if (quant_type == at::ScalarType::QUInt4x2) {
-                output_tensor = run_moe_fc_helper<__nv_bfloat16, cutlass::uint4b_t>(input_activations,
-                                                                                    gating_output,
-                                                                                    fc1_expert_weights,
-                                                                                    fc1_scales,
-                                                                                    fc1_expert_biases,
-                                                                                    fc1_activation_type,
-                                                                                    fc2_expert_weights,
-                                                                                    fc2_scales,
-                                                                                    fc2_expert_biases,
-                                                                                    skip_layer,
-                                                                                    finished,
-                                                                                    active_rows,
-                                                                                    k);
             }
             else {
                 std::string err_msg = "Unsupported weight type " + std::string(at::toString(quant_type));

@@ -20,19 +20,11 @@ import unittest
 def random_cuda_tensor(shape, dtype, mean=0, std=1):
     return torch.empty(shape, dtype=dtype, device="cuda").normal_(mean, std)
 
-def basic_moe_fc(activations, expert_for_row, weights, scales, biases):
-  if weights.dtype == torch.int8:
-      weights = torch.multiply(weights, scales.unsqueeze(1))
-      weights = weights.to(activations.dtype)
-  elif weights.dtype != torch.bfloat16 and weights.dtype != torch.float16 and weights.dtype != torch.float32:
-      raise ValueError("Invalid data type for weights")
-      
-
+def basic_moe_fc(activations, expert_for_row, weights):
   res = torch.zeros(size=[activations.shape[0], weights.shape[-1]], dtype=activations.dtype, device='cuda')
   for row in range(activations.shape[0]):
       row_expert = expert_for_row[row]
       torch.matmul(activations[row], weights[row_expert], out=res[row : row + 1, :])
-      # res[row] += biases[row_expert] # skip bias
   return res
 
 def apply_act(inp, act_str):
@@ -57,16 +49,8 @@ class TestMoe(unittest.TestCase):
   
   def generate_inputs(self, num_rows, active_rows, hidden_size, num_experts, dtype, quant_type):
     inputs = dict()
-
     inputs["input_activations"] = random_cuda_tensor([num_rows, hidden_size], dtype, mean=0, std=0.02)
     inputs["gating_output"] = random_cuda_tensor([num_rows, num_experts], dtype)
-
-    inputs["skip_layer"] = random_cuda_tensor([num_rows, hidden_size], dtype)
-
-    num_finished_sentences = num_rows - active_rows
-    finished_sentences = torch.randint(0, num_rows, [num_finished_sentences], device="cuda")
-    inputs["finished"] = torch.zeros([num_rows], dtype=torch.bool, device="cuda")
-    inputs["finished"][finished_sentences] = True
 
     return inputs
   
@@ -76,22 +60,17 @@ class TestMoe(unittest.TestCase):
 
     weights["fc1_expert_weights_for_ref"] = random_cuda_tensor([num_experts, hidden_size, inter_size], dtype, mean=0, std=0.02)
     weights["fc1_expert_weights_for_ft"] = weights["fc1_expert_weights_for_ref"]
-    weights["fc1_scales"] = torch.ones(size=[num_experts, inter_size], dtype=dtype, device="cuda")
-    weights["fc1_expert_biases"] = random_cuda_tensor([num_experts, inter_size], dtype, mean=0, std=0.002)
 
     weights["fc2_expert_weights_for_ref"] = random_cuda_tensor([num_experts, inter_size, hidden_size], dtype, mean=0, std=0.02)
     weights["fc2_expert_weights_for_ft"] = weights["fc2_expert_weights_for_ref"]
-    weights["fc2_scales"] = torch.ones(size=[num_experts, hidden_size], dtype=dtype, device="cuda")
-    weights["fc2_expert_biases"] = random_cuda_tensor([num_experts, hidden_size], dtype, mean=0, std=0.002)
-
     return weights
   
   def run_ft_moe(self, input_dict, active_rows, k, activation_str):
     moe_output = self.run_moe_fc(input_dict["input_activations"], input_dict["gating_output"], \
-                    input_dict["fc1_expert_weights_for_ft"], input_dict["fc1_scales"], input_dict["fc1_expert_biases"], \
+                    input_dict["fc1_expert_weights_for_ft"],\
                     activation_str, \
-                    input_dict["fc2_expert_weights_for_ft"], input_dict["fc2_scales"], input_dict["fc2_expert_biases"], \
-                    input_dict["skip_layer"], input_dict["finished"], active_rows, k)
+                    input_dict["fc2_expert_weights_for_ft"], \
+                    active_rows, k)
     return moe_output
   
   def run_ref_moe(self, input_dict, k, activation_str):
@@ -99,19 +78,18 @@ class TestMoe(unittest.TestCase):
     expert_scales, experts_for_row = torch.topk(gates, k, dim=-1)
 
     output = torch.zeros_like(input_dict["input_activations"])
-    # output += input_dict["skip_layer"]
 
     for k_idx in range(k):
       current_expert_scales = expert_scales[:, k_idx].unsqueeze(1)
       current_experts_for_row = experts_for_row[:, k_idx]
 
       moe_fc_1_result = basic_moe_fc(input_dict["input_activations"], current_experts_for_row, 
-                                     input_dict["fc1_expert_weights_for_ref"], input_dict["fc1_scales"], input_dict["fc1_expert_biases"])
+                                     input_dict["fc1_expert_weights_for_ref"])
 
       moe_fc_1_result = apply_act(moe_fc_1_result, activation_str)
 
       moe_fc_2_result = basic_moe_fc(moe_fc_1_result, current_experts_for_row, 
-                                     input_dict["fc2_expert_weights_for_ref"], input_dict["fc2_scales"], input_dict["fc2_expert_biases"])
+                                     input_dict["fc2_expert_weights_for_ref"])
       
       output = output + current_expert_scales * moe_fc_2_result
     return output
@@ -132,11 +110,9 @@ class TestMoe(unittest.TestCase):
                   continue
                 input_dict = self.generate_inputs(row, active_rows, hidden_size, experts, dtype, quant_type)
                 input_dict.update(weights)            
-                rows_to_check = torch.logical_not(input_dict["finished"])
 
-                # Only take unfinished rows. We can write anything to the output of rows that already complete.
-                act_output = self.run_ft_moe(input_dict, row, k, activation_str)[rows_to_check]
-                ref_output = self.run_ref_moe(input_dict, k, activation_str)[rows_to_check]
+                act_output = self.run_ft_moe(input_dict, row, k, activation_str)
+                ref_output = self.run_ref_moe(input_dict, k, activation_str)
 
                 msg = "Moe Failed on rows={}, active_rows={}, experts={}, k={}, hidden_size={}, inter_size={}" \
                         .format(row, active_rows, experts, k, hidden_size, inter_size)
