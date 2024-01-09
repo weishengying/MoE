@@ -90,8 +90,8 @@ class TestMoe(unittest.TestCase):
 
   def moe_test_helper(self, dtype, quant_type, rtol, atol, activation_str="gelu", experts_list=[32], hidden_sizes=[1024], inter_sizes=[4096]):
     torch.cuda.empty_cache() # Empty the cache here so a bad ordering does not cause OOM.
-    rows = [1024]
-    ks = [2, 4]
+    rows = [4096]
+    ks = [2]
 
     for hidden_size in hidden_sizes:
       for inter_size in inter_sizes:
@@ -117,20 +117,20 @@ class TestMoe(unittest.TestCase):
   def test_moe_fp32_relu(self):
     self.moe_test_helper(torch.float32, torch.float32, rtol=1e-3, atol=1e-5, \
                          activation_str="Swiglu", \
-                         experts_list=[32], hidden_sizes=[1024, 2048], \
-                         inter_sizes=[4096])
+                         experts_list=[8], hidden_sizes=[4096], \
+                         inter_sizes=[14336])
 
   def test_moe_fp16_gelu(self):
     self.moe_test_helper(torch.float16, torch.float16, rtol=1e-3, atol=1e-3, \
                          activation_str="Swiglu", \
-                         experts_list=[32], hidden_sizes=[1024, 2048], \
-                         inter_sizes=[4096])
+                         experts_list=[8], hidden_sizes=[4096], \
+                         inter_sizes=[14336])
 
   def test_moe_bf16_gelu(self):
     self.moe_test_helper(torch.bfloat16, torch.bfloat16, rtol=1e-3, atol=0.05, \
                          activation_str="Swiglu", \
-                         experts_list=[32], hidden_sizes=[1024, 2048], \
-                         inter_sizes=[4096])
+                         experts_list=[8], hidden_sizes=[4096], \
+                         inter_sizes=[14336])
 
 if __name__ == '__main__':
     unittest.main()

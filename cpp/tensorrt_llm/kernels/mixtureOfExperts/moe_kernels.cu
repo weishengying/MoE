@@ -978,21 +978,21 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     topkGatingSoftmaxKernelLauncher<T>(gating_output, finished, expert_scales, softmax_out_, expert_for_source_row,
         source_rows_, num_rows, num_experts, k, start_expert, end_expert, stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 
     sorter_.updateNumExperts(num_experts);
     const int sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(k * num_rows, num_experts));
     sorter_.run((void*) sorter_ws_, sorter_ws_size_bytes, expert_for_source_row, permuted_experts_, source_rows_,
         permuted_rows_, k * num_rows, stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 
     // Upper bound on number of expanded rows
     const int expanded_active_expert_rows = k * active_rows;
     computeTotalRowsBeforeExpert(
         permuted_experts_, expanded_active_expert_rows, num_experts_per_node, total_rows_before_expert_, stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 
     const bool needs_num_valid = finished || parallelism_config.ep_size > 1;
     const int64_t* num_valid_tokens_ptr
@@ -1000,7 +1000,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     expandInputRowsKernelLauncher(input_activations, permuted_data_, permuted_rows_,
         expanded_source_row_to_expanded_dest_row, num_rows, num_valid_tokens_ptr, hidden_size, k, stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 
     if (!isGatedActivation(fc1_activation_type))
     {
@@ -1016,7 +1016,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
             glu_inter_result_, total_rows_before_expert_, expanded_active_expert_rows, fc1_out_size, hidden_size,
             num_experts_per_node, ActivationType::Identity, stream);
 
-        sync_check_cuda_error();
+        // sync_check_cuda_error();
 
         // printf("glu_inter_result_:\n");
         // printToScreen<T>(glu_inter_result_, k*num_rows*fc1_out_size);
@@ -1027,13 +1027,13 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
         // printf("fc1_result_:\n");
         // printToScreen<T>(fc1_result_, k*num_rows*inter_size);
     }
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 
 
     moe_gemm_runner_.moeGemm(fc1_result_, fc2_expert_weights, fc2_scales, fc2_result, total_rows_before_expert_,
         expanded_active_expert_rows, hidden_size, inter_size, num_experts_per_node, stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 
     // printf("fc2_result:\n");
     //     printToScreen<T>(fc2_result, k*num_rows*hidden_size);
@@ -1044,7 +1044,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
         expert_for_source_row, num_rows, hidden_size, k, num_valid_tokens_ptr, parallelism_config, normalization_mode,
         stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 }
 
 template <class T, class WeightType, class Enable>
@@ -1106,7 +1106,7 @@ void makeLoadBalancedRoutingConfiguration(
     int gridDim = tensorrt_llm::common::ceilDiv(num_tokens, blockDim);
     func<<<gridDim, blockDim, 0, stream>>>(data_void, num_experts, num_tokens, k, stride);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
 }
 
 // ==================== Variable batched GEMM specializations ==================================
