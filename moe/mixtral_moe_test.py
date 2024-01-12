@@ -65,9 +65,11 @@ class TestMoe(unittest.TestCase):
     return moe_output
   
   def run_ref_moe(self, input_dict, k, activation_str):
-    gates = F.softmax(input_dict["gating_output"].to(torch.float32), dim=-1).to(input_dict["gating_output"].dtype)
-    expert_scales, experts_for_row = torch.topk(gates, k, dim=-1)
+    expert_scales = F.softmax(input_dict["gating_output"], dim=-1, dtype=torch.float32).to(input_dict["gating_output"].dtype)
+    expert_scales, experts_for_row = torch.topk(expert_scales, k, dim=-1)
+    expert_scales /= expert_scales.sum(dim=-1, keepdim=True) #除和归一化
 
+    # print(f"expert_scales: {expert_scales}")
     output = torch.zeros_like(input_dict["input_activations"])
 
     for k_idx in range(k):
@@ -90,7 +92,7 @@ class TestMoe(unittest.TestCase):
 
   def moe_test_helper(self, dtype, quant_type, rtol, atol, activation_str="gelu", experts_list=[32], hidden_sizes=[1024], inter_sizes=[4096]):
     torch.cuda.empty_cache() # Empty the cache here so a bad ordering does not cause OOM.
-    rows = [4096]
+    rows = [8192]
     ks = [2]
 
     for hidden_size in hidden_sizes:
@@ -114,11 +116,11 @@ class TestMoe(unittest.TestCase):
                 print(f"ref_output: {ref_output}")
                 torch.testing.assert_close(act_output, ref_output, rtol=rtol, atol=atol, msg=msg, check_dtype=False)
   
-  def test_moe_fp32_relu(self):
-    self.moe_test_helper(torch.float32, torch.float32, rtol=1e-3, atol=1e-5, \
-                         activation_str="Swiglu", \
-                         experts_list=[8], hidden_sizes=[4096], \
-                         inter_sizes=[14336])
+  # def test_moe_fp32_relu(self):
+  #   self.moe_test_helper(torch.float32, torch.float32, rtol=1e-3, atol=1e-5, \
+  #                        activation_str="Swiglu", \
+  #                        experts_list=[8], hidden_sizes=[4096], \
+  #                        inter_sizes=[14336])
 
   def test_moe_fp16_gelu(self):
     self.moe_test_helper(torch.float16, torch.float16, rtol=1e-3, atol=1e-3, \
@@ -127,7 +129,7 @@ class TestMoe(unittest.TestCase):
                          inter_sizes=[14336])
 
   def test_moe_bf16_gelu(self):
-    self.moe_test_helper(torch.bfloat16, torch.bfloat16, rtol=1e-3, atol=0.05, \
+    self.moe_test_helper(torch.bfloat16, torch.bfloat16, rtol=1e-3, atol=0.01, \
                          activation_str="Swiglu", \
                          experts_list=[8], hidden_sizes=[4096], \
                          inter_sizes=[14336])

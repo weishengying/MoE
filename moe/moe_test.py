@@ -74,8 +74,9 @@ class TestMoe(unittest.TestCase):
     return moe_output
   
   def run_ref_moe(self, input_dict, k, activation_str):
-    gates = F.softmax(input_dict["gating_output"].to(torch.float32), dim=-1).to(input_dict["gating_output"].dtype)
+    gates = F.softmax(input_dict["gating_output"], dim=-1).to(input_dict["gating_output"].dtype)
     expert_scales, experts_for_row = torch.topk(gates, k, dim=-1)
+    expert_scales /= expert_scales.sum(dim=-1, keepdim=True) #除和归一化
 
     output = torch.zeros_like(input_dict["input_activations"])
 

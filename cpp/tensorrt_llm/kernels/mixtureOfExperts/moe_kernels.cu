@@ -187,6 +187,10 @@ __launch_bounds__(TPB) __global__ void moeTopK(const T* inputs_after_softmax, co
   Limitations:
   1) This implementation is intended for when the number of experts is a small power of 2.
   2) This implementation assumes k is small, but will work for any k.
+  
+  WARPS_PER_CTA 其实就是每个 thread block 中的线程束个数，在该代码中，等同于 WARPS_PER_TB
+  "CAT" 通常指的是 Cooperative Thread Arrays （合作线程数组），即一个 thread block
+
 */
 
 template <typename T, int VPT, int NUM_EXPERTS, int WARPS_PER_CTA, int BYTES_PER_LDG>
@@ -203,8 +207,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     // Number of bytes each thread pulls in per load
     static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(T);
     static constexpr int ELTS_PER_ROW = NUM_EXPERTS;
-    static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT;
-    static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG;
+    static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT; // 每行需要 THREADS_PER_ROW 个线程来处理
+    static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG; // 每个线程需要执行 LDG_PER_THREAD 次 load 操作
 
     // Restrictions based on previous section.
     static_assert(VPT % ELTS_PER_LDG == 0, "The elements per thread must be a multiple of the elements per ldg");
@@ -213,9 +217,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     static_assert(THREADS_PER_ROW <= WARP_SIZE, "THREADS_PER_ROW can be at most warp size");
 
     // We have NUM_EXPERTS elements per row. We specialize for small #experts
-    static constexpr int ELTS_PER_WARP = WARP_SIZE * VPT;
-    static constexpr int ROWS_PER_WARP = ELTS_PER_WARP / ELTS_PER_ROW;
-    static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP;
+    static constexpr int ELTS_PER_WARP = WARP_SIZE * VPT; // 每个 warp 需要处理的元素个数
+    static constexpr int ROWS_PER_WARP = ELTS_PER_WARP / ELTS_PER_ROW; // 每个 warp 需要处理的行数
+    static constexpr int ROWS_PER_CTA = WARPS_PER_CTA * ROWS_PER_WARP; // 一个thread block 能够 处理的行数
 
     // Restrictions for previous section.
     static_assert(ELTS_PER_WARP % ELTS_PER_ROW == 0, "The elts per row must cleanly divide the total elt per warp");
@@ -227,12 +231,12 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     const int cta_base_row = blockIdx.x * ROWS_PER_CTA;
 
     // Now, using the base row per thread block, we compute the base row per warp.
-    const int warp_base_row = cta_base_row + threadIdx.y * ROWS_PER_WARP;
+    const int warp_base_row = cta_base_row + threadIdx.y * ROWS_PER_WARP; // block_dim (WARP_SIZE, WARPS_PER_TB) == (32, 4), 因此 threadIdx.y 表示第几个 warps
 
     // The threads in a warp are split into sub-groups that will work on a row.
     // We compute row offset for each thread sub-group
-    const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
-    const int thread_row = warp_base_row + thread_row_in_warp;
+    const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW; 
+    const int thread_row = warp_base_row + thread_row_in_warp; // 当前线程需要处理的对应行
 
     // Threads with indices out of bounds should early exit here.
     if (thread_row >= num_rows)
@@ -246,7 +250,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     const T* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
 
     // Now, we compute the group each thread belong to in order to determine the first column to start loads.
-    const int thread_group_idx = threadIdx.x % THREADS_PER_ROW;
+    const int thread_group_idx = threadIdx.x % THREADS_PER_ROW; // thread.x 表示 thread block 中的 warp 中的线程，这样计算出来，不同 warp 中的 thread 需要计算对应行中的对应列
     const int first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG;
     const T* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
 
@@ -255,11 +259,11 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
 
     // Finally, we pull in the data from global mem
-    cutlass::Array<T, VPT> row_chunk_input;
+    cutlass::Array<T, VPT> row_chunk_input; // 每个线程需要处理 VPT 个元素
     AccessType* row_chunk_vec_ptr = reinterpret_cast<AccessType*>(&row_chunk_input);
     const AccessType* vec_thread_read_ptr = reinterpret_cast<const AccessType*>(thread_read_ptr);
 #pragma unroll
-    for (int ii = 0; ii < LDG_PER_THREAD; ++ii)
+    for (int ii = 0; ii < LDG_PER_THREAD; ++ii) // 将全局内存中的 input 数据，加载到 row_chunk_input 来
     {
         row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
     }
@@ -267,7 +271,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     using ComputeType = float;
     using Converter = cutlass::NumericArrayConverter<ComputeType, T, VPT>;
     Converter compute_type_converter;
-    cutlass::Array<ComputeType, VPT> row_chunk = compute_type_converter(row_chunk_input);
+    cutlass::Array<ComputeType, VPT> row_chunk = compute_type_converter(row_chunk_input); // 把加载进来的输入数据，转换为 float
 
     // First, we perform a max reduce within the thread. We can do the max in fp16 safely (I think) and just
     // convert to float afterwards for the exp + sum reduction.
@@ -320,6 +324,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     int start_col = first_elt_read_by_thread;
     static constexpr int COLS_PER_GROUP_LDG = ELTS_PER_LDG * THREADS_PER_ROW;
 
+    float total_scale = 0.0;
     for (int k_idx = 0; k_idx < k; ++k_idx)
     {
         // First, each thread does the local argmax
@@ -371,6 +376,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
             // single) thread per row of the input/output matrices.
             const int idx = k * thread_row + k_idx;
             output[idx] = T(max_val);
+            total_scale += max_val;
             indices[idx] = should_process_row ? (expert - start_expert) : NUM_EXPERTS;
             source_rows[idx] = k_idx * num_rows + thread_row;
         }
@@ -390,6 +396,16 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
             }
         }
     }
+    // 这里增加除和归一化
+    if (thread_group_idx == 0) {
+        float inv_total_scale = 1.0f / total_scale;
+#pragma unroll
+        for (int k_idx = 0; k_idx < k; k_idx++) {
+            const int idx = k * thread_row + k_idx;
+            const float format_scale = float(output[idx]) * inv_total_scale;
+            output[idx] = T(format_scale);
+        }
+    }
 }
 
 namespace detail
@@ -398,12 +414,22 @@ namespace detail
 template <typename T, int EXPERTS, int BYTES_PER_LDG>
 struct TopkConstants
 {
-    static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(T);
-    static_assert(EXPERTS / (ELTS_PER_LDG * WARP_SIZE) == 0 || EXPERTS % (ELTS_PER_LDG * WARP_SIZE) == 0, "");
-    static constexpr int VECs_PER_THREAD = std::max(1, EXPERTS / (ELTS_PER_LDG * WARP_SIZE));
-    static constexpr int VPT = VECs_PER_THREAD * ELTS_PER_LDG;
-    static constexpr int THREADS_PER_ROW = EXPERTS / VPT;
-    static constexpr int ROWS_PER_WARP = WARP_SIZE / THREADS_PER_ROW;
+    /*
+    读懂这里的常量需要理解算法的设计思路：
+    1. 算法处理的输入shape 为 (num_rows, num_experts)
+    2. 以线程束 warp 为单位，一个 warp 处理几行，具体多少行需要计算
+    3. 向量化
+    Here, for every row, there are EXPERTS elements, and ELTS_PER_LDG of elements make up a vector, so the total vecs number is  EXPERTS / ELTS_PER_LDG
+    The orginal algo design is "all threads in a warp responsible for a row", but if we found the EXPERTS of a row is not enough, a warp will responsible more rows 
+    and a thread in a warp will handle only one vec
+    */
+    // LDG typically refers to "load global memory".
+    static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(T); // 一次内存加载操作可以加载的元素个数，如果类型是 half 或者 bfloat16, 则每次可以加载 8 个元素
+    static_assert(EXPERTS / (ELTS_PER_LDG * WARP_SIZE) == 0 || EXPERTS % (ELTS_PER_LDG * WARP_SIZE) == 0, ""); // WARP_SIZE = 32
+    static constexpr int VECs_PER_THREAD = std::max(1, EXPERTS / (ELTS_PER_LDG * WARP_SIZE)); // 每一行有 EXPERTS 个元素，EXPERTS/WARP_SIZE，可以得到，平均每个线程需要处理的元素个数，再除以ELTS_PER_LDG，就是每个线程需要处理的向量个数
+    static constexpr int VPT = VECs_PER_THREAD * ELTS_PER_LDG; //This gives the total number of elements (or vectors, depending on how you interpret it) processed by a single thread.
+    static constexpr int THREADS_PER_ROW = EXPERTS / VPT; // 每一行需要 THREADS_PER_ROW 个 thread 来处理
+    static constexpr int ROWS_PER_WARP = WARP_SIZE / THREADS_PER_ROW; // 一个线程束 wrap 可以处理 ROWS_PER_WARP 行
 };
 } // namespace detail
 
@@ -411,26 +437,34 @@ template <typename T, int EXPERTS, int WARPS_PER_TB>
 void topkGatingSoftmaxLauncherHelper(const T* input, const bool* finished, T* output, int* indices, int* source_row,
     const int num_rows, const int k, const int start_expert, const int end_expert, cudaStream_t stream)
 {
-    static constexpr std::size_t MAX_BYTES_PER_LDG = 16;
+    static constexpr std::size_t MAX_BYTES_PER_LDG = 16; // 每次从全局内存中加载 16 个字节
 
     static constexpr int BYTES_PER_LDG = std::min(MAX_BYTES_PER_LDG, sizeof(T) * EXPERTS);
     using Constants = detail::TopkConstants<T, EXPERTS, BYTES_PER_LDG>;
     static constexpr int VPT = Constants::VPT;
     static constexpr int ROWS_PER_WARP = Constants::ROWS_PER_WARP;
-    const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP;
-    const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB;
+    const int num_warps = (num_rows + ROWS_PER_WARP - 1) / ROWS_PER_WARP; //一行需要 ROWS_PER_WARP 个 warp 来处理，所以一共需要 num_warps 个 wrap
+    const int num_blocks = (num_warps + WARPS_PER_TB - 1) / WARPS_PER_TB; //一个 thread block 中最多有 WARPS_PER_TB 个 warp， 所以需要 num_blocks 个 thread block
 
-    dim3 block_dim(WARP_SIZE, WARPS_PER_TB);
+    dim3 block_dim(WARP_SIZE, WARPS_PER_TB); //一个 thread block 中有 WARPS_PER_TB 个 warp
     topkGatingSoftmax<T, VPT, EXPERTS, WARPS_PER_TB, BYTES_PER_LDG><<<num_blocks, block_dim, 0, stream>>>(
         input, finished, output, num_rows, indices, source_row, k, start_expert, end_expert);
 }
-
-template <typename T>
+/*
+input 是 gating 之后的输出， shape 为 (num_rows, num_experts), 该 kernel 实现的逻辑等同于下面 python 代码：
+```python
+expert_scales = F.softmax(input_dict["gating_output"], dim=-1）
+expert_scales, experts_for_row = torch.topk(expert_scales, k, dim=-1)
+expert_scales /= expert_scales.sum(dim=-1, keepdim=True)
+```
+*/
+// finished 一般传入空指针，表示所有的行都完成，需要被处理
+template <typename T> // T 表示 input 的数据类型
 void topkGatingSoftmaxKernelLauncher(const T* input, const bool* finished, T* output, T* softmax_temp_output,
     int* indices, int* source_row, const int num_rows, const int num_experts, const int k, const int start_expert,
     const int end_expert, cudaStream_t stream)
 {
-    static constexpr int WARPS_PER_TB = 4;
+    static constexpr int WARPS_PER_TB = 4; //每个thread block 有 4 个 warps
 
     switch (num_experts)
     {
@@ -978,7 +1012,8 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     topkGatingSoftmaxKernelLauncher<T>(gating_output, finished, expert_scales, softmax_out_, expert_for_source_row,
         source_rows_, num_rows, num_experts, k, start_expert, end_expert, stream);
 
-    // sync_check_cuda_error();
+    sync_check_cuda_error();
+    // printToScreen(expert_scales, num_rows * k);
 
     sorter_.updateNumExperts(num_experts);
     const int sorter_ws_size_bytes = pad_to_multiple_of_16(sorter_.getWorkspaceSize(k * num_rows, num_experts));
