@@ -1012,7 +1012,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     topkGatingSoftmaxKernelLauncher<T>(gating_output, finished, expert_scales, softmax_out_, expert_for_source_row,
         source_rows_, num_rows, num_experts, k, start_expert, end_expert, stream);
 
-    sync_check_cuda_error();
+    // sync_check_cuda_error();
     // printToScreen(expert_scales, num_rows * k);
 
     sorter_.updateNumExperts(num_experts);
