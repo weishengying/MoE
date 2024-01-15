@@ -207,8 +207,8 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     // Number of bytes each thread pulls in per load
     static constexpr int ELTS_PER_LDG = BYTES_PER_LDG / sizeof(T);
     static constexpr int ELTS_PER_ROW = NUM_EXPERTS;
-    static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT; // 每行需要 THREADS_PER_ROW 个线程来处理
-    static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG; // 每个线程需要执行 LDG_PER_THREAD 次 load 操作
+    static constexpr int THREADS_PER_ROW = ELTS_PER_ROW / VPT; // 每行需要 THREADS_PER_ROW 个线程来处理 （VPT表示每个线程处理的元素个数）
+    static constexpr int LDG_PER_THREAD = VPT / ELTS_PER_LDG; // 每个线程需要执行 LDG_PER_THREAD 次 load 操作，ELTS_PER_LDG 也即向量的长度
 
     // Restrictions based on previous section.
     static_assert(VPT % ELTS_PER_LDG == 0, "The elements per thread must be a multiple of the elements per ldg");
@@ -235,7 +235,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 
     // The threads in a warp are split into sub-groups that will work on a row.
     // We compute row offset for each thread sub-group
-    const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW; 
+    const int thread_row_in_warp = threadIdx.x / THREADS_PER_ROW;
     const int thread_row = warp_base_row + thread_row_in_warp; // 当前线程需要处理的对应行
 
     // Threads with indices out of bounds should early exit here.
@@ -250,13 +250,14 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
     const T* thread_row_ptr = input + thread_row * ELTS_PER_ROW;
 
     // Now, we compute the group each thread belong to in order to determine the first column to start loads.
+    // 一个 warp 中的32个线程也要分为很多 sub group, 每一个sub group 负责一行
     const int thread_group_idx = threadIdx.x % THREADS_PER_ROW; // thread.x 表示 thread block 中的 warp 中的线程，这样计算出来，不同 warp 中的 thread 需要计算对应行中的对应列
-    const int first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG;
-    const T* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread;
+    const int first_elt_read_by_thread = thread_group_idx * ELTS_PER_LDG; // 表示要读的行中的第几列
+    const T* thread_read_ptr = thread_row_ptr + first_elt_read_by_thread; // 每个线程开始读取输入的地址
 
     // Determine the pointer type to use to read in the data depending on the BYTES_PER_LDG template param. In theory,
     // this can support all powers of 2 up to 16.
-    using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>;
+    using AccessType = cutlass::AlignedArray<T, ELTS_PER_LDG>; //向量化读取，一个读取 sizeof(T) * ELTS_PER_LDG 个字节
 
     // Finally, we pull in the data from global mem
     cutlass::Array<T, VPT> row_chunk_input; // 每个线程需要处理 VPT 个元素
@@ -265,7 +266,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
 #pragma unroll
     for (int ii = 0; ii < LDG_PER_THREAD; ++ii) // 将全局内存中的 input 数据，加载到 row_chunk_input 来
     {
-        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW];
+        row_chunk_vec_ptr[ii] = vec_thread_read_ptr[ii * THREADS_PER_ROW]; // 注意这里的跳跃式加载（合并内存访问）
     }
 
     using ComputeType = float;
@@ -331,7 +332,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
         float max_val = row_chunk[0];
         int expert = start_col;
 #pragma unroll
-        for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD; ++ldg, col += COLS_PER_GROUP_LDG)
+        for (int ldg = 0, col = start_col; ldg < LDG_PER_THREAD; ++ldg, col += COLS_PER_GROUP_LDG) // 每个线程需要 lod LDG_PER_THREAD 次，每次 lod ELTS_PER_LDG 个元素，这些元素已经提前 lod 在了 row_chunk 中
         {
 #pragma unroll
             for (int ii = 0; ii < ELTS_PER_LDG; ++ii)
@@ -384,7 +385,7 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
         // Finally, we clear the value in the thread with the current max if there is another iteration to run.
         if (k_idx + 1 < k)
         {
-            const int ldg_group_for_expert = expert / COLS_PER_GROUP_LDG;
+            const int ldg_group_for_expert = expert / COLS_PER_GROUP_LDG; // 计算当前max值对应的 expert 是第几个 lod 加载得来的
             const int thread_to_clear_in_group = (expert / ELTS_PER_LDG) % THREADS_PER_ROW;
 
             // Only the thread in the group which produced the max will reset the "winning" value to -inf.
@@ -392,8 +393,9 @@ __launch_bounds__(WARPS_PER_CTA* WARP_SIZE) __global__
             {
                 const int offset_for_expert = expert % ELTS_PER_LDG;
                 // Safe to set to any negative value since row_chunk values must be between 0 and 1.
-                row_chunk[ldg_group_for_expert * ELTS_PER_LDG + offset_for_expert] = ComputeType(-10000.f);
+                row_chunk[ldg_group_for_expert * ELTS_PER_LDG + offset_for_expert] = ComputeType(-10000.f); // 每次load的向量长度是 ELTS_PER_LDG，所以需要乘 ELTS_PER_LDG
             }
+            // 向量化可以提高性能，但也使得编程难度大大增加，需要极为细心和谨慎。
         }
     }
     // 这里增加除和归一化
@@ -1010,7 +1012,7 @@ void CutlassMoeFCRunner<T, WeightType, Enable>::runMoe(const void* input_activat
     configureWsPtrs(
         workspace_ptr, num_rows, hidden_size, inter_size, num_experts, num_experts_per_node, k, fc1_activation_type);
     topkGatingSoftmaxKernelLauncher<T>(gating_output, finished, expert_scales, softmax_out_, expert_for_source_row,
-        source_rows_, num_rows, num_experts, k, start_expert, end_expert, stream);
+        source_rows_, num_rows, num_experts, k, start_expert, end_expert, stream); //处理 gating，得到每行的专家编号和得分
 
     // sync_check_cuda_error();
     // printToScreen(expert_scales, num_rows * k);
