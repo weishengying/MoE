@@ -1,4 +1,4 @@
-使用的镜像： gpu-image-cn-shanghai.cr.volces.com/gpu-train/skyllm2:v0.1
+使用的镜像： 使用 trtllm 官方推荐的镜像
 
 # 拉去第三方依赖
 git submodule init
